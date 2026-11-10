@@ -1,0 +1,97 @@
+name: Xero AI bot
+
+on:
+  # Safety net only: if the chain ever breaks, the next slot restarts the bot.
+  schedule:
+    - cron: "35 4,10,16,22 * * *"
+  # Start it by hand from the Actions tab. "chained" is set to true only by the run that starts its successor.
+  workflow_dispatch:
+    inputs:
+      chained:
+        description: "Started by the previous run (adds the short break). Leave false when you start it yourself."
+        type: boolean
+        default: false
+
+# Never two copies at the same time. A new run waits (pending) until the running one has finished.
+concurrency:
+  group: xero-ai-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write        # needed so a run can start the next run
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358          # hard safety net (GitHub's own limit is 360)
+    steps:
+      - uses: actions/checkout@v4
+
+      # 0) Stop here (and do NOT queue another run) if a required secret is missing.
+      - name: Check the secrets
+        env:
+          DERIV_PAT:        ${{ secrets.DERIV_PAT }}
+          DERIV_APP_ID:     ${{ secrets.DERIV_APP_ID }}
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          missing=""
+          for n in DERIV_PAT DERIV_APP_ID TELEGRAM_TOKEN TELEGRAM_CHAT_ID; do
+            if [ -z "${!n}" ]; then missing="$missing $n"; fi
+          done
+          if [ -n "$missing" ]; then echo "::error::Missing GitHub secret(s):$missing"; exit 1; fi
+          echo "All required secrets are set."
+
+      # 1) Line up the NEXT run right now. It stays "pending" until this run has finished, then starts by itself.
+      - name: Queue the next run
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run xero-ai.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}" -f chained=true
+
+      # 2) The break between runs (only for runs that were started by the previous run).
+      - name: Short break between runs
+        if: ${{ inputs.chained }}
+        run: sleep 120
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install requirements
+        run: pip install -r requirements.txt
+
+      # Optional: the Firebase service-account key for the website. Without the secret the bot still runs, minus the website sync.
+      - name: Write the Firebase key
+        env:
+          FIREBASE_KEY_JSON: ${{ secrets.FIREBASE_KEY_JSON }}
+        run: |
+          if [ -n "$FIREBASE_KEY_JSON" ]; then
+            printf '%s' "$FIREBASE_KEY_JSON" > serviceAccountKey.json
+            echo "Firebase key written - website sync is on."
+          else
+            echo "No FIREBASE_KEY_JSON secret - website sync is off."
+          fi
+
+      - name: Run the bot for 5h50m
+        env:
+          TZ:               Africa/Lagos      # same clock as on your phone (daily stats roll over at local midnight)
+          XEROAI_HOST:      github            # shows in the Firestore lock as "github-xxxxxx"
+          DERIV_PAT:        ${{ secrets.DERIV_PAT }}
+          DERIV_APP_ID:     ${{ secrets.DERIV_APP_ID }}
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          start=$(date +%s)
+          # SIGINT after 350 minutes = the bot's normal Ctrl+C shutdown. Exit code 124 just means "time is up".
+          timeout --foreground -s INT -k 60 350m python -u xero_ai.py || code=$?
+          if [ "${code:-0}" -ne 0 ] && [ "${code:-0}" -ne 124 ]; then
+            echo "The bot stopped with an error (code $code)."
+            if [ $(( $(date +%s) - start )) -lt 600 ]; then
+              echo "It stopped early - waiting 10 minutes so a crash cannot loop quickly."
+              sleep 600
+            fi
+            exit "$code"
+          fi
