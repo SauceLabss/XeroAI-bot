@@ -95,3 +95,14 @@ jobs:
             fi
             exit "$code"
           fi
+
+      # If the run crashed, was killed or was cancelled, the bot cannot report it itself - so tell Telegram from here.
+      - name: Tell Telegram the run stopped unexpectedly
+        if: ${{ failure() || cancelled() }}
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=⚠️ XERO AI SOFTWARE — RUN STOPPED UNEXPECTEDLY (run #${{ github.run_number }}). Open the Actions tab to see why. A queued run may start by itself shortly."
