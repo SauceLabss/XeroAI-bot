@@ -76,6 +76,9 @@ REST_BASE  = "https://api.derivws.com"
 # ---- Telegram ----
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+# True  = Telegram ONLY tells you the bot has started. Signals still go to the website (Firebase) and the log.
+# False = Telegram also sends every signal, reconnect and error message, as before.
+TELEGRAM_ONLY_START = True
 
 # ────────────────────────────────────────────────────────────
 # TICK-BASED CANDLE SIZE
@@ -239,7 +242,9 @@ def on_tick(symbol, price, epoch):
 # TELEGRAM
 # ============================================================
 
-def send_telegram(message: str):
+def send_telegram(message: str, important: bool = False):
+    if TELEGRAM_ONLY_START and not important:
+        return                      # silenced: only the "STARTED" message (important=True) goes out
     def _send():
         try:
             url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -1042,7 +1047,8 @@ if __name__ == "__main__":
         f"Time          : {get_dt()}\n"
         f"Running on    : {_run_label()}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Candles built live from raw price ticks</i>"
+        f"<i>Candles built live from raw price ticks</i>",
+        important=True
     )
 
     _start_ws_thread()
@@ -1077,10 +1083,13 @@ if __name__ == "__main__":
         print(f"\n[{get_ts()}] Stopped by user")
         running = False
         signal.signal(signal.SIGINT, signal.SIG_IGN)   # a second Ctrl+C must not cut the shutdown short
+        _next_line = ""
         if os.environ.get("GITHUB_ACTIONS") == "true":
-            send_telegram(f"⏹ <b>XERO AI SOFTWARE — RUN ENDED</b>\nRunning on: {_run_label()}\n"
-                          f"Time: {get_dt()}\nThe next run starts in about 5 minutes.")
-            time.sleep(3)   # let the message leave before the process exits
+            _next_line = (f"\nNext run starts at about {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M')} "
+                          f"(in about 5 minutes).")
+        send_telegram(f"⏹ <b>XERO AI SOFTWARE — STOPPED</b>\nRunning on: {_run_label()}\n"
+                      f"Time: {get_dt()}{_next_line}", important=True)
+        time.sleep(3)   # let the message leave before the process exits
         if ws:
             ws.close()
 
